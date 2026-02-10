@@ -48,7 +48,7 @@ export default function LoginPage() {
         <Card className="shadow-xl border-0">
           <div className="p-8 space-y-6">
             <div className="space-y-2">
-              <h1 className="text-3xl font-bold text-slate-900">Login to Account</h1>
+              <h1 className="text-3xl font-bold text-slate-900">Login to Account |</h1>
               <p className="text-slate-500">Please enter your email and password to continue</p>
             </div>
 
