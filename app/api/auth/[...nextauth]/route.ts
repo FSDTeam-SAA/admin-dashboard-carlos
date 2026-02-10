@@ -1,8 +1,82 @@
 import NextAuth, { type NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import axios from 'axios';
+import type { JWT } from 'next-auth/jwt';
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+const ACCESS_TOKEN_EXPIRY_BUFFER_MS = 30 * 1000;
+const DEFAULT_ACCESS_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+type AuthUser = {
+  id: string;
+  email: string;
+  name: string;
+  accessToken: string;
+  refreshToken: string;
+  role: string;
+  image?: string;
+};
+
+let refreshPromise: Promise<JWT> | null = null;
+
+function base64UrlDecode(input: string) {
+  const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+  return Buffer.from(padded, 'base64').toString('utf-8');
+}
+
+function getAccessTokenExpires(accessToken?: string): number | null {
+  if (!accessToken) return null;
+  try {
+    const payloadSegment = accessToken.split('.')[1];
+    if (!payloadSegment) return null;
+    const payload = JSON.parse(base64UrlDecode(payloadSegment));
+    if (typeof payload?.exp === 'number') {
+      return payload.exp * 1000;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function refreshAccessToken(token: JWT): Promise<JWT> {
+  if (!token.refreshToken) {
+    return { ...token, error: 'RefreshAccessTokenError' };
+  }
+
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/auth/reset-refresh-token`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token.refreshToken}`,
+        },
+      }
+    );
+
+    const newAccessToken = response.data?.newAccessToken;
+    const newRefreshToken = response.data?.newRefreshToken ?? token.refreshToken;
+
+    if (!newAccessToken) {
+      return { ...token, error: 'RefreshAccessTokenError' };
+    }
+
+    const accessTokenExpires =
+      getAccessTokenExpires(newAccessToken) ?? Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS;
+
+    return {
+      ...token,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      accessTokenExpires,
+      error: undefined,
+    };
+  } catch {
+    return { ...token, error: 'RefreshAccessTokenError' };
+  }
+}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -32,7 +106,7 @@ export const authOptions: NextAuthOptions = {
               refreshToken: response.data.data.refreshToken,
               role: response.data.data.role,
               image: response.data.data.user.avatar?.url || '',
-            };
+            } satisfies AuthUser;
           }
           return null;
         } catch (error: any) {
@@ -45,20 +119,46 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.id = user.id;
-        token.accessToken = (user as any).accessToken;
-        token.refreshToken = (user as any).refreshToken;
-        token.role = (user as any).role;
+        const authUser = user as AuthUser;
+        token.id = authUser.id;
+        token.accessToken = authUser.accessToken;
+        token.refreshToken = authUser.refreshToken;
+        token.role = authUser.role;
+        token.error = undefined;
+        token.accessTokenExpires =
+          getAccessTokenExpires(authUser.accessToken) ?? Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS;
+        return token;
       }
-      return token;
+
+      if (token.accessToken && !token.accessTokenExpires) {
+        const derivedExpiry = getAccessTokenExpires(token.accessToken);
+        token.accessTokenExpires = derivedExpiry ?? Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS;
+      }
+
+      const expiresAt = token.accessTokenExpires as number | undefined;
+      if (expiresAt && Date.now() < expiresAt - ACCESS_TOKEN_EXPIRY_BUFFER_MS) {
+        return token;
+      }
+
+      if (token.error === 'RefreshAccessTokenError') {
+        return token;
+      }
+
+      if (!refreshPromise) {
+        refreshPromise = refreshAccessToken(token).finally(() => {
+          refreshPromise = null;
+        });
+      }
+
+      return refreshPromise;
     },
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.id as string;
-        (session as any).accessToken = token.accessToken;
-        (session as any).refreshToken = token.refreshToken;
-        (session as any).role = token.role;
+        session.user.role = token.role as string;
       }
+      session.accessToken = token.accessToken as string | undefined;
+      session.error = token.error as 'RefreshAccessTokenError' | undefined;
       return session;
     },
   },

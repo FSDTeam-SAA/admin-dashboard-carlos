@@ -16,7 +16,7 @@ const queryClient = new QueryClient({
 
 export default function Providers({ children }: { children: ReactNode }) {
   return (
-    <SessionProvider>
+    <SessionProvider refetchInterval={5 * 60} refetchOnWindowFocus={false}>
       <QueryClientProvider client={queryClient}>
         {children}
       </QueryClientProvider>
